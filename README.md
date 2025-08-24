@@ -50,3 +50,19 @@ py .\gen_glad_doxygen.py `
 - `\note` with version/extension info from `gl.xml`.
 
 If a refpage covers multiple related commands, the script picks the prototype that matches the current function name.
+
+Update functions will end up looking like this:
+```c
+GLAD_API_CALL PFNGLVIEWPORTPROC glad_glViewport;
+/**
+ * \brief set the viewport.
+ * \param x (GLint) - Specify the lower left corner of the viewport rectangle, in pixels. The initial value is (0,0).
+ * \param y (GLint) - Specify the lower left corner of the viewport rectangle, in pixels. The initial value is (0,0).
+ * \param width (GLsizei) - Specify the width and height of the viewport. When a GL context is first attached to a window, width and height are set to the dimensions of that window.
+ * \param height (GLsizei) - Specify the width and height of the viewport. When a GL context is first attached to a window, width and height are set to the dimensions of that window.
+ * \see https://registry.khronos.org/OpenGL-Refpages/gl4/html/glViewport.xhtml
+ * \note Introduced in OpenGL 1.0
+ */
+#define glViewport glad_glViewport
+```
+
