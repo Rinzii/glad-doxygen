@@ -51,7 +51,7 @@ py .\gen_glad_doxygen.py `
 
 If a refpage covers multiple related commands, the script picks the prototype that matches the current function name.
 
-Update functions will end up looking like this:
+Updated functions will end up looking like this:
 ```c
 GLAD_API_CALL PFNGLVIEWPORTPROC glad_glViewport;
 /**
