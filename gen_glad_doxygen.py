@@ -39,26 +39,32 @@ from __future__ import annotations
 import argparse, os, re, xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple, Set
 
+# Collapse runs of whitespace to single spaces
 def norm_ws(s: str) -> str:
     return " ".join(s.split())
 
+# Concatenate all text nodes under an XML element
 def flatten_text(elem: ET.Element) -> str:
     return "".join(elem.itertext())
 
+# Build a public Khronos refpage URL for a function
 def make_refpage_url(folder_tag: str, func: str) -> str:
     return f"https://registry.khronos.org/OpenGL-Refpages/{folder_tag}/html/{func}.xhtml"
 
 class GLRegistry:
+    """Minimal reader for gl.xml: commands, aliases, versions, and extensions."""
+
     def __init__(self, xml_path: str):
         self.root = ET.parse(xml_path).getroot()
-        self.commands: Dict[str, Dict] = {}
-        self.alias_of: Dict[str, str] = {}
-        self.introduced_version: Dict[str, str] = {}
-        self.extensions_for_cmd: Dict[str, Set[str]] = {}
+        self.commands: Dict[str, Dict] = {}             # name -> {"ret": str, "params": list, "alias": str|None}
+        self.alias_of: Dict[str, str] = {}              # name -> canonical name
+        self.introduced_version: Dict[str, str] = {}    # name -> "major.minor"
+        self.extensions_for_cmd: Dict[str, Set[str]] = {}  # name -> {EXT1, EXT2, ...}
         self._parse_commands()
         self._parse_features()
         self._parse_extensions()
 
+    # Fill command signatures and alias links
     def _parse_commands(self) -> None:
         for cmd in self.root.findall("./commands/command"):
             proto = cmd.find("proto")
@@ -67,9 +73,13 @@ class GLRegistry:
             name = proto.findtext("name")
             if not name:
                 continue
+
+            # Return type: remove the function name token from the proto text
             proto_text = norm_ws(flatten_text(proto))
             ret_type = norm_ws(re.sub(r"\b"+re.escape(name)+r"\b", "", proto_text))
             ret_type = norm_ws(ret_type.replace("APIENTRY", "").replace("GLAPIENTRY", ""))
+
+            # Parameters: capture type/name and optional group/len metadata
             params: List[Dict[str, Optional[str]]] = []
             for p in cmd.findall("param"):
                 pname = p.findtext("name")
@@ -83,11 +93,14 @@ class GLRegistry:
                     "group": p.get("group"),
                     "len": p.get("len"),
                 })
+
             alias = cmd.get("alias")
             if alias:
                 self.alias_of[name] = alias
+
             self.commands[name] = {"ret": ret_type, "params": params, "alias": alias}
 
+    # Record the earliest core GL version introducing each command
     def _parse_features(self) -> None:
         for feat in self.root.findall("./feature"):
             if feat.get("api") != "gl":
@@ -103,6 +116,7 @@ class GLRegistry:
                     if nm not in self.introduced_version:
                         self.introduced_version[nm] = number
                     else:
+                        # Keep the minimum version seen; ignore parse errors
                         try:
                             a = tuple(map(int, number.split(".")))
                             b = tuple(map(int, self.introduced_version[nm].split(".")))
@@ -111,6 +125,7 @@ class GLRegistry:
                         except Exception:
                             pass
 
+    # Map commands to extension names that add them
     def _parse_extensions(self) -> None:
         for ext in self.root.findall("./extensions/extension"):
             ext_name = ext.get("name")
@@ -123,6 +138,7 @@ class GLRegistry:
                         continue
                     self.extensions_for_cmd.setdefault(nm, set()).add(ext_name)
 
+    # Follow alias links to a canonical command name
     def resolve_alias(self, name: str) -> str:
         seen = set()
         cur = name
@@ -131,12 +147,14 @@ class GLRegistry:
             cur = self.alias_of[cur]
         return cur
 
+    # Exact-name signature from gl.xml
     def signature(self, name: str) -> Optional[Tuple[str, List[Dict[str, Optional[str]]]]]:
         info = self.commands.get(name)
         if not info:
             return None
         return info["ret"], info["params"]
 
+    # Canonical-name signature (after alias resolution)
     def signature_canonical(self, name: str) -> Optional[Tuple[str, List[Dict[str, Optional[str]]], str]]:
         canon = self.resolve_alias(name)
         sig = self.signature(canon)
@@ -145,6 +163,7 @@ class GLRegistry:
         ret, params = sig
         return ret, params, canon
 
+    # Earliest core version (if any) and extensions introducing the command
     def version_or_exts(self, name: str) -> Tuple[Optional[str], List[str]]:
         v = self.introduced_version.get(name)
         if v is None:
@@ -154,18 +173,22 @@ class GLRegistry:
         return v, exts
 
 class RefPages:
+    """Lightweight DocBook reader for brief text, C prototypes, and parameter descriptions."""
     DB_NS = {"db": "http://docbook.org/ns/docbook"}
+
     def __init__(self, folder: Optional[str]):
         self.folder = os.path.abspath(folder) if folder else None
         self.folder_tag = os.path.basename(self.folder) if self.folder else "gl4"
-        self.cache: Dict[str, ET.Element] = {}
+        self.cache: Dict[str, ET.Element] = {}  # func -> parsed XML root
 
+    # Path to "<func>.xml" if present
     def _path(self, func: str) -> Optional[str]:
         if not self.folder:
             return None
         p = os.path.join(self.folder, f"{func}.xml")
         return p if os.path.isfile(p) else None
 
+    # Parse XML; if strict parse fails, strip DOCTYPE/unknown entities and retry
     def _parse_lenient(self, path: str) -> Optional[ET.Element]:
         try:
             return ET.parse(path).getroot()
@@ -181,6 +204,7 @@ class RefPages:
         except Exception:
             return None
 
+    # Load and cache the refpage XML root
     def load(self, func: str) -> Optional[ET.Element]:
         if func in self.cache:
             return self.cache[func]
@@ -192,6 +216,7 @@ class RefPages:
             self.cache[func] = root
         return root
 
+    # Short one-line description
     def brief(self, func: str) -> Optional[str]:
         root = self.load(func)
         if root is None:
@@ -201,6 +226,7 @@ class RefPages:
             txt = root.findtext(".//refpurpose")
         return norm_ws(txt) if txt else None
 
+    # Extract C prototype: return type and list of (type, name)
     def c_signature(self, func: str) -> Optional[Tuple[str, List[Tuple[str,str]]]]:
         root = self.load(func)
         if root is None:
@@ -228,11 +254,13 @@ class RefPages:
             return ret, params
         return None
 
+    # Map parameter name -> description text from the "Parameters" section
     def param_descriptions(self, func: str) -> Dict[str, str]:
         root = self.load(func)
         out: Dict[str, str] = {}
         if root is None:
             return out
+
         sect = None
         for node in root.findall(".//db:refsect1", self.DB_NS) + root.findall(".//refsect1"):
             title = (node.findtext("db:title", namespaces=self.DB_NS) or node.findtext("title") or "").strip().lower()
@@ -241,6 +269,7 @@ class RefPages:
                 break
         if sect is None:
             return out
+
         vlists = sect.findall(".//db:variablelist", self.DB_NS) + sect.findall(".//variablelist")
         for v in vlists:
             entries = v.findall("./db:varlistentry", self.DB_NS) + v.findall("./varlistentry")
@@ -261,11 +290,13 @@ class RefPages:
                         out[nm] = desc
         return out
 
+# Build one \param line, including optional metadata trailer
 def make_param_line_with_desc(pname: str, ptype: str, desc: Optional[str], trailer: str = "") -> str:
     if desc:
         return f" * \\param {pname} ({ptype}) - {desc}{trailer}"
     return f" * \\param {pname} ({ptype}){trailer}"
 
+# Append compact hints (group/len) from gl.xml if available
 def make_param_trailer_from_reg(reg_p: Optional[Dict[str, Optional[str]]]) -> str:
     if not reg_p:
         return ""
@@ -276,18 +307,22 @@ def make_param_trailer_from_reg(reg_p: Optional[Dict[str, Optional[str]]]) -> st
         extras.append(f"len: {reg_p['len']}")
     return ("  [" + " | ".join(extras) + "]") if extras else ""
 
+# Match lines of the form: "#define glFoo glad_glFoo"
 DEFINE_RE = re.compile(r'^\s*#\s*define\s+(gl[A-Za-z0-9_]+)\s+(glad_gl[A-Za-z0-9_]+)\s*$')
 
+# If a Doxygen block sits directly above a #define, return its (start, end) indices
 def find_docblock_above(lines: List[str], idx_define: int) -> Optional[Tuple[int,int]]:
     j = idx_define - 1
     while j >= 0 and lines[j].strip() == "":
         j -= 1
     if j < 0:
         return None
+    # Single-line /** ... */
     if "*/" not in lines[j]:
         if lines[j].lstrip().startswith("/**") and "*/" in lines[j]:
             return (j, j)
         return None
+    # Multi-line /** ... */: walk upward to find the start
     end = j
     k = j
     while k >= 0:
@@ -302,23 +337,33 @@ def find_docblock_above(lines: List[str], idx_define: int) -> Optional[Tuple[int
         break
     return None
 
+# Create a Doxygen block for a GL function name
 def build_doc(gl_name: str, reg: GLRegistry, refs: RefPages) -> Optional[str]:
     canon = reg.resolve_alias(gl_name)
+
+    # Prefer exact refpage; fall back to canonical alias
     brief = refs.brief(gl_name)
     if brief is None and canon != gl_name:
         brief = refs.brief(canon)
+
     sig = refs.c_signature(gl_name)
     if sig is None and canon != gl_name:
         sig = refs.c_signature(canon)
+
+    # Parameter descriptions from refpage
     pdesc = refs.param_descriptions(gl_name)
     if not pdesc and canon != gl_name:
         pdesc = refs.param_descriptions(canon)
+
+    # Parameter metadata from gl.xml
     reg_sig = reg.signature_canonical(gl_name)
     reg_params_by_name: Dict[str, Dict[str, Optional[str]]] = {}
     if reg_sig:
         _ret_r, _params_r, _canon_r = reg_sig
         for rp in _params_r:
             reg_params_by_name[rp["name"]] = rp
+
+    # Choose a signature source
     if sig is None and reg_sig is None:
         return None
     if sig is None and reg_sig is not None:
@@ -326,6 +371,8 @@ def build_doc(gl_name: str, reg: GLRegistry, refs: RefPages) -> Optional[str]:
         params_list = [(p["type"], p["name"]) for p in reg_sig[1]]
     else:
         ret, params_list = sig  # type: ignore
+
+    # Assemble the comment block
     lines: List[str] = []
     lines.append("/**")
     if brief:
@@ -333,6 +380,7 @@ def build_doc(gl_name: str, reg: GLRegistry, refs: RefPages) -> Optional[str]:
             lines.append(f" * \\brief {brief}.")
         else:
             lines.append(f" * \\brief {brief}")
+
     seen_p: Set[str] = set()
     for ptype, pname in params_list:
         if pname in seen_p:
@@ -340,9 +388,12 @@ def build_doc(gl_name: str, reg: GLRegistry, refs: RefPages) -> Optional[str]:
         seen_p.add(pname)
         trailer = make_param_trailer_from_reg(reg_params_by_name.get(pname))
         lines.append(make_param_line_with_desc(pname, ptype, pdesc.get(pname), trailer))
+
     if ret and ret.strip() != "void":
         lines.append(f" * \\return ({ret})")
+
     lines.append(f" * \\see {make_refpage_url(refs.folder_tag, gl_name)}")
+
     version, exts = reg.version_or_exts(gl_name)
     note_parts: List[str] = []
     if version:
@@ -351,12 +402,16 @@ def build_doc(gl_name: str, reg: GLRegistry, refs: RefPages) -> Optional[str]:
         note_parts.append("Introduced by extension(s): " + ", ".join(exts))
     if note_parts:
         lines.append(" * \\note " + " | ".join(note_parts))
+
     lines.append(" */")
     return "\n".join(lines)
 
+# Read input header, inject/refresh docblocks above matching #defines, and write output
 def process(in_path: str, out_path: str, reg: GLRegistry, refs: RefPages) -> None:
     with open(in_path, "r", encoding="utf-8", newline="") as f:
         src_lines = f.read().splitlines()
+
+    # Identify ranges of existing docblocks immediately above matching defines
     skip: Set[int] = set()
     for i, line in enumerate(src_lines):
         if DEFINE_RE.match(line):
@@ -365,6 +420,7 @@ def process(in_path: str, out_path: str, reg: GLRegistry, refs: RefPages) -> Non
                 a, b = rng
                 for t in range(a, b + 1):
                     skip.add(t)
+
     out_lines: List[str] = []
     i = 0
     n = len(src_lines)
@@ -384,16 +440,22 @@ def process(in_path: str, out_path: str, reg: GLRegistry, refs: RefPages) -> Non
             continue
         out_lines.append(line)
         i += 1
+
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(out_lines) + "\n")
 
+# CLI entry point
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Insert/refresh Doxygen above GLAD alias macros using DocBook refpages; fallback to gl.xml for signature/notes when needed.")
+    ap = argparse.ArgumentParser(
+        description="Insert/refresh Doxygen above GLAD alias macros using DocBook refpages; "
+                    "fallback to gl.xml for signature/notes when needed."
+    )
     ap.add_argument("--in", dest="in_path", required=True)
     ap.add_argument("--xml", dest="xml_path", required=True)
     ap.add_argument("--out", dest="out_path", required=True)
     ap.add_argument("--refpages", dest="refpages", required=True)
     args = ap.parse_args()
+
     reg = GLRegistry(args.xml_path)
     refs = RefPages(args.refpages)
     process(args.in_path, args.out_path, reg, refs)
